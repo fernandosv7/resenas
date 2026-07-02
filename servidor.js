@@ -1,29 +1,59 @@
 const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+
 const app = express();
 app.use(express.json());
 
-const db = {};
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
-app.get('/t/:uid', (req, res) => {
-  const destino = db[req.params.uid];
-  if (!destino) return res.send('Aún no configurado');
-  res.redirect(302, destino);
+app.get('/t/:uid', async (req, res) => {
+  const uid = req.params.uid;
+
+  const { data } = await supabase
+    .from('chips')
+    .select('url_destino, toques')
+    .eq('uid', uid)
+    .single();
+
+  if (!data) return res.send('Aún no configurado');
+
+  await supabase
+    .from('chips')
+    .update({ toques: (data.toques || 0) + 1 })
+    .eq('uid', uid);
+
+  res.redirect(302, data.url_destino);
 });
 
-app.get('/admin/set', (req, res) => {
+app.get('/admin/set', async (req, res) => {
   const { uid, url } = req.query;
   if (!uid || !url) return res.send('Faltan uid y url');
-  db[uid] = url;
+
+  const { error } = await supabase
+    .from('chips')
+    .upsert({ uid, url_destino: url, toques: 0 }, { onConflict: 'uid' });
+
+  if (error) return res.send('Error: ' + error.message);
   res.send(`✅ ${uid} → ${url}`);
 });
 
-app.get('/admin', (req, res) => {
-  const chips = Object.entries(db).map(([uid, url]) =>
-    `<li><b>${uid}</b> → ${url}</li>`).join('');
+app.get('/admin', async (req, res) => {
+  const { data: chips } = await supabase
+    .from('chips')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  const lista = (chips || []).map(c =>
+    `<li><b>${c.uid}</b> → ${c.url_destino} (${c.toques} toques)</li>`
+  ).join('');
+
   res.send(`
     <h1>Panel</h1>
-    <p>${Object.keys(db).length} chips configurados</p>
-    <ul>${chips || '<li>Ninguno</li>'}</ul>
+    <p>${(chips || []).length} chips configurados</p>
+    <ul>${lista || '<li>Ninguno</li>'}</ul>
     <form action="/admin/set">
       UID: <input name="uid" required><br>
       URL: <input name="url" size="50" required><br>

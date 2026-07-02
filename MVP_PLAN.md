@@ -67,31 +67,61 @@ Este es el código que corre el servidor:
 
 ```js
 const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+
 const app = express();
 app.use(express.json());
 
-const db = {};
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
-app.get('/t/:uid', (req, res) => {
-  const destino = db[req.params.uid];
-  if (!destino) return res.send('Aún no configurado');
-  res.redirect(302, destino);
+app.get('/t/:uid', async (req, res) => {
+  const uid = req.params.uid;
+
+  const { data } = await supabase
+    .from('chips')
+    .select('url_destino, toques')
+    .eq('uid', uid)
+    .single();
+
+  if (!data) return res.send('Aún no configurado');
+
+  await supabase
+    .from('chips')
+    .update({ toques: (data.toques || 0) + 1 })
+    .eq('uid', uid);
+
+  res.redirect(302, data.url_destino);
 });
 
-app.get('/admin/set', (req, res) => {
+app.get('/admin/set', async (req, res) => {
   const { uid, url } = req.query;
   if (!uid || !url) return res.send('Faltan uid y url');
-  db[uid] = url;
+
+  const { error } = await supabase
+    .from('chips')
+    .upsert({ uid, url_destino: url, toques: 0 }, { onConflict: 'uid' });
+
+  if (error) return res.send('Error: ' + error.message);
   res.send(`✅ ${uid} → ${url}`);
 });
 
-app.get('/admin', (req, res) => {
-  const chips = Object.entries(db).map(([uid, url]) =>
-    `<li><b>${uid}</b> → ${url}</li>`).join('');
+app.get('/admin', async (req, res) => {
+  const { data: chips } = await supabase
+    .from('chips')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  const lista = (chips || []).map(c =>
+    `<li><b>${c.uid}</b> → ${c.url_destino} (${c.toques} toques)</li>`
+  ).join('');
+
   res.send(`
     <h1>Panel</h1>
-    <p>${Object.keys(db).length} chips configurados</p>
-    <ul>${chips || '<li>Ninguno</li>'}</ul>
+    <p>${(chips || []).length} chips configurados</p>
+    <ul>${lista || '<li>Ninguno</li>'}</ul>
     <form action="/admin/set">
       UID: <input name="uid" required><br>
       URL: <input name="url" size="50" required><br>
@@ -138,6 +168,46 @@ Si ves un panel con un formulario, está funcionando.
 - **Android:** Google Play Store → "NFC Tools" de wakdev
 - **iPhone:** App Store → "NFC Tools" de wakdev
 - Es gratis (versión Pro no necesaria para MVP)
+
+### 1.6 Configurar Supabase (base de datos online)
+
+Supabase guarda los datos de los chips (UID, URL, contador de toques) para que no se pierdan al reiniciar el servidor.
+
+**Paso a paso:**
+
+1. Andá a https://supabase.com y creá una cuenta gratis (GitHub login)
+2. Botón **"New project"**
+3. Elegí un nombre: `resenas`
+4. Seteá una contraseña (guardala)
+5. Elegí región **South America** o **US East** (la más cercana)
+6. Botón **"Create new project"** (esperá 1-2 minutos que lo crea)
+7. En el menú izquierdo, andá a **"SQL Editor"**
+8. Hacé clic en **"New query"** y pegá este SQL:
+
+```sql
+CREATE TABLE chips (
+  uid TEXT PRIMARY KEY,
+  url_destino TEXT NOT NULL,
+  toques INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+9. Botón **"Run"** — se crea la tabla `chips`
+10. Andá a **"Project Settings"** (engranaje) → **"API"**
+11. Copiá estos dos valores:
+    - **Project URL** → lo ponés como `SUPABASE_URL` en las variables de entorno
+    - **anon public key** → lo ponés como `SUPABASE_ANON_KEY`
+12. En tu servidor de Render: andá a **Dashboard** → tu Web Service → **Environment**
+13. Agregá las variables:
+
+| Variable | Valor |
+|---|---|
+| `SUPABASE_URL` | el Project URL que copiaste |
+| `SUPABASE_ANON_KEY` | el anon key que copiaste |
+14. Botón **"Save"** → Render se reinicia solo con la BD conectada
+15. Probá: abrí `https://resenas.onrender.com/admin` y configurá un chip
+16. Si lo ves en el panel, **persiste aunque reinicies Render** ✅
 
 ---
 
@@ -316,13 +386,16 @@ Cuando consigas un cliente:
 7. El cliente coloca el expositor en su local
 8. Cada vez que alguien toca, va directo a sus reseñas
 
-### 3.5 Hacer seguimiento de las estadísticas (sin panel automático)
+### 3.5 Estadísticas desde el panel admin
 
-Al principio, con los datos que tienes en Render no hay persistencia (cuando el servidor se reinicia, los datos se pierden). Para el MVP no importa. Pero para las estadísticas básicas:
+Con Supabase ya tenés persistencia y contador de toques. Cada vez que alguien escanea un chip, el contador se incrementa automáticamente.
 
-- **Pregunta al cliente directamente:** "¿Cuántas reseñas recibiste esta semana?"
-- **Mira en Google Maps** cuántas reseñas tiene y su promedio
-- **Compara antes/después** para tener casos de éxito
+En el panel admin (`/admin`) ves:
+- Cuántos chips tenés configurados
+- Cuántos toques (usos) tuvo cada chip
+- Los chips ordenados del más nuevo al más viejo
+
+Esto te permite saber, sin preguntarle al cliente, si el dispositivo se está usando.
 
 ---
 
@@ -358,6 +431,7 @@ Según la respuesta, prioriza:
 | Item | Costo |
 |---|---|
 | Render (gratis) | $0 |
+| Supabase (gratis 500MB) | $0 |
 | Chips NFC 50 uds (AliExpress) | ~$15 USD |
 | Materiales 5 expositores | ~$10 USD |
 | App NFC Tools | $0 |
@@ -372,6 +446,9 @@ Según la respuesta, prioriza:
 - [ ] Servidor Render funcionando con URL
 - [ ] Código en GitHub y servidor activo en Render
 - [ ] Panel admin funciona en `[tunombre].onrender.com/admin`
+- [ ] Cuenta Supabase creada
+- [ ] Tabla `chips` creada en Supabase SQL Editor
+- [ ] Variables `SUPABASE_URL` y `SUPABASE_ANON_KEY` configuradas en Render
 - [ ] Chips NFC comprados (AliExpress o local)
 - [ ] App NFC Tools instalada en el celular
 - [ ] 1 chip programado y probado
@@ -388,10 +465,10 @@ Según la respuesta, prioriza:
 
 ## NOTAS PARA PRÓXIMAS SESIONES
 
-**Sesión 2 — Persistencia de datos:**
-- Agregar SQLite para que los datos no se pierdan al reiniciar el servidor
-- Agregar conteo de toques (analytics básico)
+**Sesión 2 — Mejoras:**
 - Agregar QR dinámico (generar QR para imprimir desde el panel)
+- Agregar login al panel admin (contraseña)
+- Notificaciones por WhatsApp cuando alguien deja reseña
 
 **Sesión 3 — Mejora de producto:**
 - Investigar fabricación en serie (acrílico cortado láser)
