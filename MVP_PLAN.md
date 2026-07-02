@@ -82,30 +82,44 @@ app.get('/t/:uid', async (req, res) => {
 
   const { data } = await supabase
     .from('chips')
-    .select('url_destino, toques')
+    .select('url_destino, toques, activo')
     .eq('uid', uid)
     .single();
 
-  if (!data) return res.send('Aún no configurado');
+  if (!data || !data.activo) return res.send('Aún no configurado');
 
   await supabase
     .from('chips')
-    .update({ toques: (data.toques || 0) + 1 })
+    .update({
+      toques: (data.toques || 0) + 1,
+      ultimo_toque: new Date().toISOString()
+    })
     .eq('uid', uid);
+
+  await supabase
+    .from('toques_log')
+    .insert({
+      uid,
+      ip: req.ip || '',
+      dispositivo: (req.headers['user-agent'] || '').substring(0, 200)
+    });
 
   res.redirect(302, data.url_destino);
 });
 
 app.get('/admin/set', async (req, res) => {
-  const { uid, url } = req.query;
+  const { uid, url, negocio = '', cliente = '', telefono = '' } = req.query;
   if (!uid || !url) return res.send('Faltan uid y url');
 
   const { error } = await supabase
     .from('chips')
-    .upsert({ uid, url_destino: url, toques: 0 }, { onConflict: 'uid' });
+    .upsert(
+      { uid, url_destino: url, negocio, cliente, telefono, toques: 0, activo: true },
+      { onConflict: 'uid' }
+    );
 
   if (error) return res.send('Error: ' + error.message);
-  res.send(`✅ ${uid} → ${url}`);
+  res.send(`✅ ${uid} → ${url} (${negocio})`);
 });
 
 app.get('/admin', async (req, res) => {
@@ -114,18 +128,29 @@ app.get('/admin', async (req, res) => {
     .select('*')
     .order('created_at', { ascending: false });
 
-  const lista = (chips || []).map(c =>
-    `<li><b>${c.uid}</b> → ${c.url_destino} (${c.toques} toques)</li>`
-  ).join('');
+  const lista = (chips || []).map(c => {
+    const ultimo = c.ultimo_toque
+      ? new Date(c.ultimo_toque).toLocaleString('es-AR')
+      : 'Nunca';
+    return `<li>
+      <b>${c.uid}</b> → ${c.url_destino}
+      <br>${c.negocio} | Cliente: ${c.cliente || '-'} | Tel: ${c.telefono || '-'}
+      <br>📊 ${c.toques} toques | Último: ${ultimo} ${c.activo ? '✅' : '❌'}
+    </li>`;
+  }).join('');
 
   res.send(`
     <h1>Panel</h1>
     <p>${(chips || []).length} chips configurados</p>
     <ul>${lista || '<li>Ninguno</li>'}</ul>
+    <h3>Configurar nuevo chip</h3>
     <form action="/admin/set">
       UID: <input name="uid" required><br>
-      URL: <input name="url" size="50" required><br>
-      <button>Configurar</button>
+      URL destino: <input name="url" size="50" required><br>
+      Negocio: <input name="negocio"><br>
+      Cliente: <input name="cliente"><br>
+      Teléfono: <input name="telefono"><br>
+      <button>Guardar</button>
     </form>
   `);
 });
@@ -188,12 +213,25 @@ Supabase guarda los datos de los chips (UID, URL, contador de toques) para que n
 CREATE TABLE chips (
   uid TEXT PRIMARY KEY,
   url_destino TEXT NOT NULL,
+  negocio TEXT DEFAULT '',
+  cliente TEXT DEFAULT '',
+  telefono TEXT DEFAULT '',
   toques INTEGER DEFAULT 0,
+  ultimo_toque TIMESTAMPTZ,
+  activo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE toques_log (
+  id BIGSERIAL PRIMARY KEY,
+  uid TEXT REFERENCES chips(uid),
+  timestamp TIMESTAMPTZ DEFAULT NOW(),
+  ip TEXT DEFAULT '',
+  dispositivo TEXT DEFAULT ''
 );
 ```
 
-9. Botón **"Run"** — se crea la tabla `chips`
+9. Botón **"Run"** — se crean las tablas `chips` y `toques_log`
 10. Andá a **"Project Settings"** (engranaje) → **"API"**
 11. Copiá estos dos valores:
     - **Project URL** → lo ponés como `SUPABASE_URL` en las variables de entorno
@@ -388,14 +426,16 @@ Cuando consigas un cliente:
 
 ### 3.5 Estadísticas desde el panel admin
 
-Con Supabase ya tenés persistencia y contador de toques. Cada vez que alguien escanea un chip, el contador se incrementa automáticamente.
+Con Supabase ya tenés persistencia y analytics completo. Cada toque se registra automáticamente.
 
 En el panel admin (`/admin`) ves:
 - Cuántos chips tenés configurados
-- Cuántos toques (usos) tuvo cada chip
-- Los chips ordenados del más nuevo al más viejo
+- Datos del negocio, cliente, teléfono
+- Cuántos toques tuvo cada chip
+- Último uso (fecha y hora)
+- Estado del chip (activo/inactivo)
 
-Esto te permite saber, sin preguntarle al cliente, si el dispositivo se está usando.
+Además, la tabla `toques_log` guarda el historial completo: IP, dispositivo, timestamp. Sirve para responder cosas como *"¿cuántas veces usaron el chip la semana pasada?"*.
 
 ---
 

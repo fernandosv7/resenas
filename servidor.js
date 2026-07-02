@@ -14,30 +14,44 @@ app.get('/t/:uid', async (req, res) => {
 
   const { data } = await supabase
     .from('chips')
-    .select('url_destino, toques')
+    .select('url_destino, toques, activo')
     .eq('uid', uid)
     .single();
 
-  if (!data) return res.send('Aún no configurado');
+  if (!data || !data.activo) return res.send('Aún no configurado');
 
   await supabase
     .from('chips')
-    .update({ toques: (data.toques || 0) + 1 })
+    .update({
+      toques: (data.toques || 0) + 1,
+      ultimo_toque: new Date().toISOString()
+    })
     .eq('uid', uid);
+
+  await supabase
+    .from('toques_log')
+    .insert({
+      uid,
+      ip: req.ip || '',
+      dispositivo: (req.headers['user-agent'] || '').substring(0, 200)
+    });
 
   res.redirect(302, data.url_destino);
 });
 
 app.get('/admin/set', async (req, res) => {
-  const { uid, url } = req.query;
+  const { uid, url, negocio = '', cliente = '', telefono = '' } = req.query;
   if (!uid || !url) return res.send('Faltan uid y url');
 
   const { error } = await supabase
     .from('chips')
-    .upsert({ uid, url_destino: url, toques: 0 }, { onConflict: 'uid' });
+    .upsert(
+      { uid, url_destino: url, negocio, cliente, telefono, toques: 0, activo: true },
+      { onConflict: 'uid' }
+    );
 
   if (error) return res.send('Error: ' + error.message);
-  res.send(`✅ ${uid} → ${url}`);
+  res.send(`✅ ${uid} → ${url} (${negocio})`);
 });
 
 app.get('/admin', async (req, res) => {
@@ -46,18 +60,29 @@ app.get('/admin', async (req, res) => {
     .select('*')
     .order('created_at', { ascending: false });
 
-  const lista = (chips || []).map(c =>
-    `<li><b>${c.uid}</b> → ${c.url_destino} (${c.toques} toques)</li>`
-  ).join('');
+  const lista = (chips || []).map(c => {
+    const ultimo = c.ultimo_toque
+      ? new Date(c.ultimo_toque).toLocaleString('es-AR')
+      : 'Nunca';
+    return `<li>
+      <b>${c.uid}</b> → ${c.url_destino}
+      <br>${c.negocio} | Cliente: ${c.cliente || '-'} | Tel: ${c.telefono || '-'}
+      <br>📊 ${c.toques} toques | Último: ${ultimo} ${c.activo ? '✅' : '❌'}
+    </li>`;
+  }).join('');
 
   res.send(`
     <h1>Panel</h1>
     <p>${(chips || []).length} chips configurados</p>
     <ul>${lista || '<li>Ninguno</li>'}</ul>
+    <h3>Configurar nuevo chip</h3>
     <form action="/admin/set">
       UID: <input name="uid" required><br>
-      URL: <input name="url" size="50" required><br>
-      <button>Configurar</button>
+      URL destino: <input name="url" size="50" required><br>
+      Negocio: <input name="negocio"><br>
+      Cliente: <input name="cliente"><br>
+      Teléfono: <input name="telefono"><br>
+      <button>Guardar</button>
     </form>
   `);
 });
